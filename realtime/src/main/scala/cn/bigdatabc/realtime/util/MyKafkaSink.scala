@@ -50,4 +50,18 @@ object MyKafkaSink {
     kafkaProducer.send(new ProducerRecord[String, String](topic, key, msg))
   }
 
+  def closeKafkaProducer() = {
+    try
+      kafkaProducer.close()
+    catch {
+      case e: Exception =>
+        println("暂时没数据，生产者进程已关闭")
+    }
+  }
+
+  def main(args: Array[String]): Unit = {
+    send("ods_order_info","ss")
+    closeKafkaProducer
+  }
+
 }
