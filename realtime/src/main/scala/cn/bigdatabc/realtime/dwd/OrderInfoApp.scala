@@ -3,7 +3,7 @@ package cn.bigdatabc.realtime.dwd
 import java.text.SimpleDateFormat
 import java.util.Date
 
-import cn.bigdatabc.realtime.bean.{OrderInfo, UserStatus}
+import cn.bigdatabc.realtime.bean.{OrderInfo, ProvinceInfo, UserInfo, UserStatus}
 import cn.bigdatabc.realtime.util._
 import com.alibaba.fastjson.serializer.SerializeConfig
 import com.alibaba.fastjson.{JSON, JSONObject}
@@ -11,6 +11,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.common.TopicPartition
 import org.apache.spark.SparkConf
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.streaming.dstream.{DStream, InputDStream}
 import org.apache.spark.streaming.kafka010.{HasOffsetRanges, OffsetRange}
@@ -142,7 +143,94 @@ object OrderInfoApp {
     }
 //    orderInfoRealDStream.print(10)
 
+    //===================5.和省份维度表进行关联====================
+//    //5.1 方案1：以分区为单位，对订单数据进行处理，和Phoenix中的订单表进行关联
+//    val orderInfoWithProvinceDStream: DStream[OrderInfo] = orderInfoRealDStream.mapPartitions(
+//      orderInfoItr => {
+//        //转换为List
+//        val orderInfoList: List[OrderInfo] = orderInfoItr.toList
+//        //获取当前分区中订单对应的省份id
+//        val provinceIdList: List[Long] = orderInfoList.map(_.province_id)
+//        //根据省份id到Phoenix中查询对应的省份信息
+//        var sql: String = s"select id,name,area_code,iso_code from gmall0523_province_info where id in('${provinceIdList.mkString("','")}')"
+//        val provinceInfoList: List[JSONObject] = PhoenixUtil.queryList(sql)
+//        //将json对象转换为省份样例类对象，返回provinceInfoMap从而供给给orderInfo
+//        val provinceInfoMap: Map[String, ProvinceInfo] = provinceInfoList.map(
+//          provinceInfoJSONObj => {
+//            val provinceInfo: ProvinceInfo = JSON.toJavaObject(provinceInfoJSONObj, classOf[ProvinceInfo])
+//            (provinceInfo.id, provinceInfo)
+//          }
+//        ).toMap
+//        //对订单数据进行遍历，用遍历出的省份id ，从provinceInfoMap获取省份对象
+//        for (orderInfo <- orderInfoList) {
+//          val provinceInfo: ProvinceInfo = provinceInfoMap.getOrElse(orderInfo.province_id.toString, null)
+//          orderInfo.province_area_code = provinceInfo.area_code
+//          orderInfo.province_name = provinceInfo.name
+//          orderInfo.province_iso_code = provinceInfo.iso_code
+//        }
+//        orderInfoList.toIterator
+//      }
+//    )
+//    orderInfoWithProvinceDStream.print(10)
 
+    //5.2 方案2  以采集周期为单位对数据进行处理 --->通过SQL将所有的省份查询出来
+    val orderInfoWithProvinceDStream: DStream[OrderInfo] = orderInfoRealDStream.transform(
+      rdd => {
+        //从Phoenix中查询所有的省份数据
+        var sql: String = "select id,name,area_code,iso_code from gmall0523_province_info"
+        val provinceInfoList: List[JSONObject] = PhoenixUtil.queryList(sql)
+        //将json对象转换为省份样例类对象
+        val provinceInfoMap: Map[String, ProvinceInfo] = provinceInfoList.map(
+          provinceInfoJsonObj => {
+            val provinceInfo: ProvinceInfo = JSON.toJavaObject(provinceInfoJsonObj, classOf[ProvinceInfo])
+            (provinceInfo.id, provinceInfo)
+          }
+        ).toMap
+        //定义省份的广播变量
+        val bdMap: Broadcast[Map[String, ProvinceInfo]] = ssc.sparkContext.broadcast(provinceInfoMap)
+        rdd.map(
+          orderInfo => {
+            val provinceInfo: ProvinceInfo = bdMap.value.getOrElse(orderInfo.province_id.toString, null)
+            if (provinceInfo != null) {
+              orderInfo.province_name = provinceInfo.name
+              orderInfo.province_area_code = provinceInfo.area_code
+              orderInfo.province_iso_code = provinceInfo.iso_code
+            }
+            orderInfo
+          }
+        )
+      }
+    )
+
+    //===================6.和用户维度表进行关联====================
+    //以分区为单位对数据进行处理，每个分区拼接一个sql 到phoenix上查询用户数据
+    val orderInfoWithUserInfoDStream: DStream[OrderInfo] = orderInfoWithProvinceDStream.mapPartitions(
+      orderInfoItr => {
+        //转换为list集合
+        val orderInfoList: List[OrderInfo] = orderInfoItr.toList
+        //获取所有的用户id
+        val userIdList: List[Long] = orderInfoList.map(_.user_id)
+        //根据id拼接sql语句，到phoenix查询用户
+        var sql: String = s"select id,user_level,birthday,gender,age_group,gender_name from gmall0523_user_info where id in ('${userIdList.mkString("','")}')"
+        //当前分区中所有的下单用户
+        val userList: List[JSONObject] = PhoenixUtil.queryList(sql)
+        val userMap: Map[String, UserInfo] = userList.map(
+          userInfoJsonObj => {
+            val userInfo: UserInfo = JSON.toJavaObject(userInfoJsonObj, classOf[UserInfo])
+            (userInfo.id, userInfo)
+          }
+        ).toMap
+        for (orderInfo <- orderInfoList) {
+          val userInfoObj: UserInfo = userMap.getOrElse(orderInfo.user_id.toString, null)
+          if (userInfoObj != null) {
+            orderInfo.user_age_group = userInfoObj.age_group
+            orderInfo.user_gender = userInfoObj.gender_name
+          }
+        }
+        orderInfoList.toIterator
+      }
+    )
+    orderInfoWithUserInfoDStream.print(1000)
 
 
 
