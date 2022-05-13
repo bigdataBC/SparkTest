@@ -108,6 +108,43 @@ object OrderInfoApp {
     )
     //orderInfoWithFirstFlagDStream.print(1000)
 
+    /*
+    ===================4.同一批次中状态修正  ====================
+    应该将同一采集周期的同一用户的最早的订单标记为首单，其它都改为非首单
+    	同一采集周期的同一用户-----按用户分组（groupByKey）
+    	最早的订单-----排序，取最早（sortwith）
+    	标记为首单-----具体业务代码
+    */
+    //对待处理的数据进行结构转换orderInfo====>(userId,orderInfo)
+    val mapDS: DStream[(Long, OrderInfo)] = orderInfoWithFirstFlagDStream.map(orderInfo => (orderInfo.user_id, orderInfo))
+    //根据用户id对数据进行分组
+    val groupByKeyDStream: DStream[(Long, Iterable[OrderInfo])] = mapDS.groupByKey()
+    //判断在一个采集周期中，用户用户是否下了多个订单
+    val orderInfoRealDStream: DStream[OrderInfo] = groupByKeyDStream.flatMap {
+      case (userId, orderInfoItr) => {
+        val orderInfoList: List[OrderInfo] = orderInfoItr.toList
+        //如果下了多个订单，按照下单时间升序排序
+        if (orderInfoList != null && orderInfoList.size > 1) {
+          val sortList: List[OrderInfo] = orderInfoList.sortWith((orderA, orderB) => orderA.create_time < orderB.create_time)
+          //取出集合中的第一个元素
+          val firstOrder: OrderInfo = sortList(0)
+          firstOrder.if_first_order = "1"
+          //时间最早的订单首单状态保留为1，其它的都设置为非首单
+          for (i <- 1 until sortList.size) {
+            sortList(i).if_first_order = "0"
+          }
+          sortList
+          //否则只有一个订单则直接返回
+        } else {
+          orderInfoList
+        }
+      }
+    }
+//    orderInfoRealDStream.print(10)
+
+
+
+
 
     //===================3.维护首单用户状态|||保存订单到ES中  ====================
     //如果当前用户为首单用户（第一次消费），那么我们进行首单标记之后，应该将用户的消费状态保存到Hbase中，等下次这个用户再下单的时候，就不是首单了
