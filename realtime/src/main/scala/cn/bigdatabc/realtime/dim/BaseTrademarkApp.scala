@@ -11,7 +11,6 @@ import org.apache.spark.streaming.dstream.{DStream, InputDStream}
 import org.apache.spark.streaming.kafka010.{HasOffsetRanges, OffsetRange}
 import org.apache.spark.streaming.{Seconds, StreamingContext}
 
-import scala.reflect.internal.util.HasClassPath
 
 /**
   * 从Kafka中读取品牌维度数据，保存到Hbase
